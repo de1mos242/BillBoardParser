@@ -4,3 +4,6 @@
 *.jar
 *.war
 *.ear
+*.db3
+./bin
+./pages
