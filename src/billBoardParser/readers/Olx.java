@@ -172,7 +172,7 @@ public class Olx {
 		System.out.println("price: " + price.text());
 	}
 	
-	public void DownloadPage(String link) throws Exception {
+	public String DownloadPage(String link) throws Exception {
 		String[] splittedUrl = link.split("/");
 		String filename = "pages/" + splittedUrl[splittedUrl.length-1];
 		System.out.println("Working " + link);
@@ -208,14 +208,15 @@ public class Olx {
 		{
 			System.out.println("file " + filename + " exists");
 		}
-		Statement updateStatement = dbConnection.createStatement();
+		/*Statement updateStatement = dbConnection.createStatement();
 		String updateQuery = "update pages set filename = '" + filename + "'  where url = '" + link + "'";
 		System.out.println(updateQuery);
 		int rows = updateStatement.executeUpdate(updateQuery);
 		System.out.println("updated " + rows + " rows");
 		//dbConnection.setAutoCommit(false);
 		//dbConnection.setAutoCommit(true);
-		updateStatement.close();
+		updateStatement.close();*/
+		return filename;
 	}
 	
 	public void downloadAllReadedPages() throws Exception {
@@ -227,21 +228,41 @@ public class Olx {
 		ResultSet counter = dbStatement.executeQuery("select count(*) from pages where filename is not null and filename <> ''");
 		counter.next();
 		System.out.println("count with filename: " + counter.getString(1));
-		boolean hasNext = false;
-		do {
-			hasNext = false;
-			ResultSet rs = dbStatement.executeQuery("select url from pages where filename is null limit 1");
-			if (rs.next()) {
-				String link = rs.getString(1);
-				rs.close();
-				DownloadPage(link);
-				hasNext = true;
-			}
-			else
+		counter.close();
+		
+		ArrayList<String> workSet = new ArrayList<String>();
+		
+		ResultSet rs = dbStatement.executeQuery("select url from pages where filename is null");
+		while (rs.next()) {
+			String link = rs.getString(1);
+			workSet.add(link);
+		}
+		rs.close();
+		
+		int i = 0;
+		int trashHold = 10;
+		String updateQuery = "update pages set filename = ? where url = ?";
+		PreparedStatement updatePageStatment = null;
+		for (String link : workSet) {
+			if (updatePageStatment == null)
 			{
-				rs.close();
+				updatePageStatment = dbConnection.prepareStatement(updateQuery);
 			}
-		} while(hasNext);
+			
+			String filename = DownloadPage(link);
+			updatePageStatment.setString(1, filename);
+			updatePageStatment.setString(2, link);
+			updatePageStatment.addBatch();
+			
+			i++;
+			if (i >= trashHold)
+			{
+				updatePageStatment.executeBatch();
+				updatePageStatment = null;
+				i=0;
+			}
+		}
+		updatePageStatment.close();
 	}
 	
 }
