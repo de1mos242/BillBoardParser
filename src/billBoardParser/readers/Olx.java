@@ -14,6 +14,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map.Entry;
 
 import org.jsoup.Connection;
 import org.jsoup.Jsoup;
@@ -42,6 +44,11 @@ public class Olx {
 		dbStatement.execute("create table if not exists 'pages' ('id' INTEGER PRIMARY KEY AUTOINCREMENT, 'url' text, 'filename' text);");
 		dbStatement.execute("create unique index if not exists 'url_index' on 'pages' ('url') ");
 		dbStatement.execute("create unique index if not exists 'filename_index' on 'pages' ('filename') ");
+		
+		dbStatement.execute("create table if not exists 'parsed_page' ('id' INTEGER PRIMARY KEY AUTOINCREMENT, 'type' string, 'name' string, 'data' text, 'filename' text);");
+		dbStatement.execute("create index if not exists 'filename_index' on 'parsed_page' ('filename')");
+		dbStatement.execute("create index if not exists 'type_index' on 'parsed_page' ('type')");
+		
 		System.out.println("Db prepared");
 	}
 	
@@ -70,7 +77,10 @@ public class Olx {
 				}
 				while (!loaded);
 				
-				ArrayList<String> currentPagePosts = GetPostsFromPage(currentPage);
+				ArrayList<Boolean> cruchFoundLoaded = new ArrayList<>();
+				ArrayList<String> currentPagePosts = GetPostsFromPage(currentPage, cruchFoundLoaded);
+				if (cruchFoundLoaded.size() > 0)
+					break;
 				log("page " + pageNumber + " " + currentUrl);
 				printList(currentPagePosts);
 				log("page loaded " + pageNumber);
@@ -94,7 +104,7 @@ public class Olx {
 		return entries;
 	}
 	
-	private ArrayList<String> GetPostsFromPage(Document page) throws Exception {
+	private ArrayList<String> GetPostsFromPage(Document page, ArrayList<Boolean> foundLoaded) throws Exception {
 		Elements posts = page.select("h3 a");
 		ArrayList<String> result = new ArrayList<String>();
 		log("posts size: " + posts.size());
@@ -104,7 +114,8 @@ public class Olx {
 			String url = el.attr("href");
 			if (url.matches("^http.*"))
 			{
-				if (!dbStatement.executeQuery("select 'id' from 'pages' where url = '" + url + "'").next())
+				ResultSet checkRS = dbStatement.executeQuery("select 'id' from 'pages' where url = '" + url + "'");
+				if (!checkRS.next())
 				{
 					hasToInsert = true;
 					result.add(url);
@@ -114,11 +125,13 @@ public class Olx {
 				else
 				{
 					log("skip: " + url);
+					foundLoaded.add(true);
 				}
+				checkRS.close();
 			}
 			else
 			{
-				log("wrong: " + url);
+				//log("wrong: " + url);
 			}
 		}
 		if (hasToInsert)
@@ -127,6 +140,7 @@ public class Olx {
 			insertPageStatment.executeBatch();
 			//dbConnection.setAutoCommit(true);
 		}
+		insertPageStatment.close();
 		return result;
 	}
 	
@@ -208,14 +222,6 @@ public class Olx {
 		{
 			System.out.println("file " + filename + " exists");
 		}
-		/*Statement updateStatement = dbConnection.createStatement();
-		String updateQuery = "update pages set filename = '" + filename + "'  where url = '" + link + "'";
-		System.out.println(updateQuery);
-		int rows = updateStatement.executeUpdate(updateQuery);
-		System.out.println("updated " + rows + " rows");
-		//dbConnection.setAutoCommit(false);
-		//dbConnection.setAutoCommit(true);
-		updateStatement.close();*/
 		return filename;
 	}
 	
@@ -262,7 +268,168 @@ public class Olx {
 				i=0;
 			}
 		}
-		updatePageStatment.close();
+		if (updatePageStatment != null)
+		{
+			updatePageStatment.executeBatch();
+			updatePageStatment.close();
+		}
 	}
 	
+	public void ParsePages() throws Exception {
+		ArrayList<String> parsedFiles = new ArrayList<>();
+		ResultSet rs = dbStatement.executeQuery("select distinct filename from parsed_page");
+		while (rs.next()) {
+			parsedFiles.add(rs.getString(1));
+		}
+		rs.close();
+		
+		ArrayList<String> workSet = new ArrayList<>();
+		rs = dbStatement.executeQuery("select filename from pages where filename is not null");
+		while(rs.next()) {
+			String tempFilename = rs.getString(1);
+			if (!parsedFiles.contains(tempFilename)) {
+				workSet.add(tempFilename);
+			}
+		}
+		rs.close();
+		
+		parsedFiles.clear();
+		for (String filename : workSet) {
+			System.out.println("File " + filename);
+			if (new File(filename).length() == 0L) {
+				System.out.println("file skipped because it's empty!");
+				continue;
+			}
+			HashMap<String, Object> parsedData = parsePage(filename);
+			SaveParsedData(parsedData, filename);
+		}
+	}
+	
+	@SuppressWarnings("unchecked")
+	void SaveParsedData(HashMap<String, Object> parsedData, String filename) throws Exception {
+		PreparedStatement insertParsedPageStatment = dbConnection.prepareStatement("insert into 'parsed_page' ('type','name','data','filename') values (?,?,?,?);");
+		//HashMap<String, String> allFields = new HashMap<>();
+		
+		HashMap<String, String> commonPart = (HashMap<String, String>)parsedData.get("commonFields");
+		//System.out.println("  commonFields:");
+		for (Entry<String, String> commonField : commonPart.entrySet()) {
+			//System.out.println("    " + commonField.getKey() + " - " + commonField.getValue());
+			//allFields.put(commonField.getKey(), commonField.getValue());
+			insertParsedPageStatment.setString(1, "commonField");
+			insertParsedPageStatment.setString(2, commonField.getKey());
+			insertParsedPageStatment.setString(3, commonField.getValue());
+			insertParsedPageStatment.setString(4, filename);
+			insertParsedPageStatment.addBatch();
+		}
+		
+		HashMap<String, String> userData = (HashMap<String, String>)parsedData.get("userData");
+		//System.out.println("  userData:");
+		for (Entry<String, String> userDataEntry : userData.entrySet()) {
+			//System.out.println("    " + userDataEntry.getKey() + " - " + userDataEntry.getValue());
+			//allFields.put(userDataEntry.getKey(), userDataEntry.getValue());
+			insertParsedPageStatment.setString(1, "userData");
+			insertParsedPageStatment.setString(2, userDataEntry.getKey());
+			insertParsedPageStatment.setString(3, userDataEntry.getValue());
+			insertParsedPageStatment.setString(4, filename);
+			insertParsedPageStatment.addBatch();
+		}
+		
+		HashMap<String, String> additionalPart = (HashMap<String, String>)parsedData.get("additionalFields");
+		//System.out.println("  additionalFields:");
+		for (Entry<String, String> additionalField : additionalPart.entrySet()) {
+			//System.out.println("    " + additionalField.getKey() + " - " + additionalField.getValue());
+			//allFields.put(additionalField.getKey(), additionalField.getValue());
+			insertParsedPageStatment.setString(1, "additionalFields");
+			insertParsedPageStatment.setString(2, additionalField.getKey());
+			insertParsedPageStatment.setString(3, additionalField.getValue());
+			insertParsedPageStatment.setString(4, filename);
+			insertParsedPageStatment.addBatch();
+		}
+		
+		ArrayList<String> images = (ArrayList<String>)parsedData.get("images");
+		//System.out.println("  images:");
+		for (int i=0;i<images.size();i++) {
+			//System.out.println("    " + images.get(i));
+			//allFields.put("img"+i, images.get(i));
+			insertParsedPageStatment.setString(1, "images");
+			insertParsedPageStatment.setString(2, "img"+i);
+			insertParsedPageStatment.setString(3, images.get(i));
+			insertParsedPageStatment.setString(4, filename);
+			insertParsedPageStatment.addBatch();
+		}
+		
+		insertParsedPageStatment.executeBatch();
+		System.out.println("file "+ filename + " parsed");
+	}
+	
+	HashMap<String, Object> parsePage(String filename) throws Exception {
+		HashMap<String, Object> pageData = new HashMap<>();
+		Document page = Jsoup.parse(new File(filename), "utf-8");
+		pageData.put("commonFields", getCommonFields(page));
+		pageData.put("userData", getUserFields(page));
+		pageData.put("additionalFields", getAdditionalFields(page));
+		pageData.put("images", getImages(page));
+		return pageData;
+	}
+	
+	HashMap<String, String> getCommonFields(Document page) {
+		HashMap<String, String> commonFields = new HashMap<>();
+		commonFields.put("Type", page.select("#firstpath1").first().text());
+		commonFields.put("SubType", page.select("#firstpath2").first().text());
+		commonFields.put("Subject", page.select("div.h1").first().text().replaceAll(" — Красноярск", ""));
+		Element description = page.select("#item-desc #description-text").first();
+		if (description != null)
+		{
+			String textDesc = "";
+			for (Element paragraph : description.select("p")) {
+				textDesc += paragraph.text();
+			}
+			if (textDesc != "")
+				commonFields.put("Description", textDesc);
+		}
+		return commonFields;
+	}
+	
+	HashMap<String, String> getUserFields(Document page) {
+		HashMap<String, String> userFields = new HashMap<>();
+		userFields.put("UserNick", page.select(".user-wrapper").first().text());
+		Element phone = page.select(".phone").first();
+		if (phone != null)
+			userFields.put("UserPhone", phone.text());
+		return userFields;
+	}
+	
+	HashMap<String, String> getAdditionalFields(Document page) {
+		HashMap<String, String> additionalFields = new HashMap<>();
+		for (Element highLight : page.select(".item-highlights")) {
+			//System.out.println("check " + highLight.text());
+			if (highLight.text().equalsIgnoreCase(""))
+				continue;
+			String data = highLight.select("strong").first().text();
+			additionalFields.put(highLight.text().replaceFirst(data, "").trim(), data);
+		}
+		for (Element option : page.select(".optionals")) {
+			Elements optionsDT = option.select("dt");
+			Elements optionsDD = option.select("dd");
+			for (int i=0;i<optionsDT.size();i++) {
+				additionalFields.put(optionsDT.get(i).text().replace(":", ""), optionsDD.get(i).text());
+			}
+		}
+		return additionalFields;
+	}
+	
+	
+	
+	ArrayList<String> getImages(Document page) {
+		ArrayList<String> images = new ArrayList<>();
+		Elements imgList = page.select(".big-nav-thumb");
+		for (Element img: imgList)
+		{
+			Element link = img.select("a").first();
+			if (link != null)
+				images.add(link.attr("href"));
+		}
+		return images;
+	}
 }
+

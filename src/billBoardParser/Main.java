@@ -12,11 +12,13 @@ public class Main {
 		try
 		{
 			Olx parser = new Olx();
-			//ArrayList<String> result = parser.FindNewPosts();
-			//parser.ParsePage("http://krasnoyarsk.olx.ru/16-iid-442571778");
-			//parser.DownloadPage("http://krasnoyarsk.olx.ru/130-270-iid-442572452");
+			System.out.println("Find new posts");
+			parser.FindNewPosts();
+			System.out.println("download pages");
 			parser.downloadAllReadedPages();
-			System.out.println("all: ");
+			System.out.println("parsing pages");
+			parser.ParsePages();
+			System.out.println("finish");
 			
 		}
 		catch (Exception e)
