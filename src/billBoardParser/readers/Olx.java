@@ -12,6 +12,7 @@ import java.net.URLConnection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -49,6 +50,9 @@ public class Olx {
 		dbStatement.execute("create index if not exists 'filename_index' on 'parsed_page' ('filename')");
 		dbStatement.execute("create index if not exists 'type_index' on 'parsed_page' ('type')");
 		
+		dbStatement.execute("create table if not exists 'exported_pages' ('id' INTEGER PRIMARY KEY AUTOINCREMENT, 'filename' string);");
+		dbStatement.execute("create unique index if not exists 'filename_index' on 'exported_pages' ('filename') ");
+		
 		System.out.println("Db prepared");
 	}
 	
@@ -77,7 +81,7 @@ public class Olx {
 				}
 				while (!loaded);
 				
-				ArrayList<Boolean> cruchFoundLoaded = new ArrayList<>();
+				ArrayList<Boolean> cruchFoundLoaded = new ArrayList<Boolean>();
 				ArrayList<String> currentPagePosts = GetPostsFromPage(currentPage, cruchFoundLoaded);
 				if (cruchFoundLoaded.size() > 0)
 					break;
@@ -276,14 +280,14 @@ public class Olx {
 	}
 	
 	public void ParsePages() throws Exception {
-		ArrayList<String> parsedFiles = new ArrayList<>();
+		ArrayList<String> parsedFiles = new ArrayList<String>();
 		ResultSet rs = dbStatement.executeQuery("select distinct filename from parsed_page");
 		while (rs.next()) {
 			parsedFiles.add(rs.getString(1));
 		}
 		rs.close();
 		
-		ArrayList<String> workSet = new ArrayList<>();
+		ArrayList<String> workSet = new ArrayList<String>();
 		rs = dbStatement.executeQuery("select filename from pages where filename is not null");
 		while(rs.next()) {
 			String tempFilename = rs.getString(1);
@@ -296,12 +300,20 @@ public class Olx {
 		parsedFiles.clear();
 		for (String filename : workSet) {
 			System.out.println("File " + filename);
-			if (new File(filename).length() == 0L) {
-				System.out.println("file skipped because it's empty!");
-				continue;
+			try
+			{
+				if (new File(filename).length() == 0L) {
+					System.out.println("file skipped because it's empty!");
+					continue;
+				}
+				HashMap<String, Object> parsedData = parsePage(filename);
+				if (parsedData.size()==0)
+					continue;
+				SaveParsedData(parsedData, filename);
 			}
-			HashMap<String, Object> parsedData = parsePage(filename);
-			SaveParsedData(parsedData, filename);
+			catch (Exception e) {
+				System.out.println("failure " + e.getMessage());
+			}
 		}
 	}
 	
@@ -363,9 +375,12 @@ public class Olx {
 	}
 	
 	HashMap<String, Object> parsePage(String filename) throws Exception {
-		HashMap<String, Object> pageData = new HashMap<>();
+		HashMap<String, Object> pageData = new HashMap<String, Object>();
 		Document page = Jsoup.parse(new File(filename), "utf-8");
-		pageData.put("commonFields", getCommonFields(page));
+		HashMap<String, String> commonFields = getCommonFields(page);
+		if (commonFields.size() == 0)
+			return pageData;
+		pageData.put("commonFields", commonFields);
 		pageData.put("userData", getUserFields(page));
 		pageData.put("additionalFields", getAdditionalFields(page));
 		pageData.put("images", getImages(page));
@@ -373,8 +388,11 @@ public class Olx {
 	}
 	
 	HashMap<String, String> getCommonFields(Document page) {
-		HashMap<String, String> commonFields = new HashMap<>();
-		commonFields.put("Type", page.select("#firstpath1").first().text());
+		HashMap<String, String> commonFields = new HashMap<String, String>();
+		Element type = page.select("#firstpath1").first();
+		if (type == null)
+			return commonFields;
+		commonFields.put("Type", type.text());
 		commonFields.put("SubType", page.select("#firstpath2").first().text());
 		commonFields.put("Subject", page.select("div.h1").first().text().replaceAll(" — Красноярск", ""));
 		Element description = page.select("#item-desc #description-text").first();
@@ -391,7 +409,7 @@ public class Olx {
 	}
 	
 	HashMap<String, String> getUserFields(Document page) {
-		HashMap<String, String> userFields = new HashMap<>();
+		HashMap<String, String> userFields = new HashMap<String, String>();
 		userFields.put("UserNick", page.select(".user-wrapper").first().text());
 		Element phone = page.select(".phone").first();
 		if (phone != null)
@@ -400,7 +418,7 @@ public class Olx {
 	}
 	
 	HashMap<String, String> getAdditionalFields(Document page) {
-		HashMap<String, String> additionalFields = new HashMap<>();
+		HashMap<String, String> additionalFields = new HashMap<String, String>();
 		for (Element highLight : page.select(".item-highlights")) {
 			//System.out.println("check " + highLight.text());
 			if (highLight.text().equalsIgnoreCase(""))
@@ -421,7 +439,7 @@ public class Olx {
 	
 	
 	ArrayList<String> getImages(Document page) {
-		ArrayList<String> images = new ArrayList<>();
+		ArrayList<String> images = new ArrayList<String>();
 		Elements imgList = page.select(".big-nav-thumb");
 		for (Element img: imgList)
 		{
@@ -431,5 +449,241 @@ public class Olx {
 		}
 		return images;
 	}
+	
+	public void ExportDML() throws SQLException, IOException {
+		ArrayList<String> exportedFiles = new ArrayList<String>();
+		ResultSet rs = dbStatement.executeQuery("select filename from exported_pages");
+		while (rs.next()) {
+			exportedFiles.add(rs.getString(1));
+		}
+		rs.close();
+		
+		ArrayList<String> workSet = new ArrayList<String>();
+		rs = dbStatement.executeQuery("select distinct filename from parsed_page");
+		while(rs.next()) {
+			String tempFilename = rs.getString(1);
+			if (!exportedFiles.contains(tempFilename)) {
+				workSet.add(tempFilename);
+			}
+		}
+		rs.close();
+		
+		PreparedStatement insertStatment = dbConnection.prepareStatement("insert into 'exported_pages' ('filename') values (?);");
+		
+		exportedFiles.clear();
+		BufferedWriter exporter = new BufferedWriter(new FileWriter(new File("insert_statements.sql"), false));
+		int maxcount = 10;
+		int counter = 0;
+		for (int i=0;i<workSet.size();i++) {
+			String filename = workSet.get(i);
+			if (counter == 0)
+			{
+				exporter.write(GetInsertHeader());
+				exporter.newLine();
+			}
+			System.out.println("export file " + filename);
+			try
+			{
+				exporter.write(exportSinglePage(filename));
+				insertStatment.setString(1, filename);
+				insertStatment.addBatch();
+				counter++;
+				if (counter < maxcount && i<workSet.size()-1)
+				{
+					exporter.write(",");
+				}
+				else
+				{
+					insertStatment.executeBatch();
+					exporter.write(";");
+					exporter.newLine();
+					counter = 0;
+				}
+				exporter.newLine();
+			}
+			catch (Exception e) {
+				System.out.println("failure " + e.getMessage());
+			}
+			exporter.flush();
+		}
+		insertStatment.close();
+		exporter.close();
+	}
+	
+	String exportSinglePage(String filename) throws Exception {
+		//'id' 'type' 'name' 'data' 'filename'
+		HashMap<String, String> commonPart = new HashMap<String, String>();
+		HashMap<String, String> userData = new HashMap<String, String>();
+		HashMap<String, String> additionalFields = new HashMap<String, String>();
+		ResultSet rs = dbStatement.executeQuery("select type, name, data from parsed_page where filename = '"+filename+"';");
+		while(rs.next()) {
+			String type = rs.getString(1);
+			String name = rs.getString(2);
+			String data = rs.getString(3);
+			if (type.equals("commonField")) {
+				commonPart.put(name, data);				
+			}
+			else if (type.equals("userData")) {
+				userData.put(name, data);
+			}
+			else if (type.equals("additionalFields")) {
+				additionalFields.put(name, data);
+			}
+		}
+		rs.close();
+		
+		String category, Author, title, phone, text, price, catFields;
+		if (categoryMap.containsKey(commonPart.get("Type")+"||" + commonPart.get("SubType")))
+		{
+			String catblock = categoryMap.get(commonPart.get("Type")+"||"+commonPart.get("SubType"));
+			category = catblock.replace('|', '>') .split(">>")[1];
+		}
+		else
+		{
+			throw new Exception("Not found category: " + commonPart.get("Type")+" -> " + commonPart.get("SubType"));
+		}
+		
+		Author = userData.get("UserNick");
+		if (userData.containsKey("UserPhone"))
+			phone = userData.get("UserPhone");
+		else
+			phone = "";
+		
+		title = commonPart.get("Subject");
+		
+		if (additionalFields.containsKey("Цена")) {
+			String tempPrice = additionalFields.get("Цена");
+			tempPrice = tempPrice.split("р")[0].replaceAll(" ", "");
+			price = String.valueOf(Integer.parseInt(tempPrice));
+		}
+		else
+		{
+			price = "0";
+		}
+		
+		catFields = "";
+		text = commonPart.get("Description");
+		for (Entry<String, String> addition : additionalFields.entrySet()) {
+			//text += ", " + addition.getKey() + ": " + addition.getValue();
+			catFields += "<b>"+addition.getKey()+":</b> <span>" + addition.getValue() + "</span><br/>";
+		}
+		
+		
+		String res = GetInsertLine(category, Author, title, phone, text, price, catFields);
+		return res;
+	}
+	
+	String GetInsertLine(String category, String Author, String title, String phone,
+			String text, String price, String catFields)
+	{
+		String res = "("+category+",'"+Author+"','"+title+"','','Красноярск', 1,'','"+
+				phone + "','"+text+"',"+price+",'','','"+curTS+"','"+catFields+"')";
+		return res;
+	}
+	
+	String GetInsertHeader()
+	{
+		return "INSERT INTO `jb_board` (`id_category`, `autor`, `title`, `email`, `city`, `city_id`, `url`, " +
+				"`contacts`, `text`, `price`, `video`, `tags`, `date_add`, `cat_fields`) VALUES ";
+	}
+	
+	HashMap<String, String> categoryMap = generateCategoryMap();
+	
+	private HashMap<String, String> generateCategoryMap() {
+		HashMap<String, String> map = new HashMap<String, String>();
+		map.put("Бизнес и промышленность||Металлы","8||86");
+		map.put("Бизнес и промышленность||Пищевая промышленность, продукты питания","8||198");
+		map.put("Бизнес и промышленность||Лесная и деревообрабатывающая промышленность","11||89");
+		map.put("Бизнес и промышленность||Продается бизнес","9||184");
+		map.put("Бизнес и промышленность||Строительство","11||193");
+		map.put("Бизнес и промышленность||Другие предложения","11||193");
+		map.put("Бизнес и промышленность||Оборудование","8||86");
+		map.put("Бизнес и промышленность||Опт, поставки, импорт-экспорт","12||217");
+		map.put("Бизнес и промышленность||Нефть, газ, уголь","1||175");
+		map.put("Бизнес и промышленность||Химия","8||86");
+		map.put("Бизнес и промышленность||ИТ, Интернет, связь","12||219");
+		map.put("Куплю - Продам||Животные и растения","2||71");
+		map.put("Куплю - Продам||Детские товары","8||108");
+		map.put("Куплю - Продам||Компьютеры и комплектующие","6||230");
+		map.put("Куплю - Продам||Все для дома и сада","2||100");
+		map.put("Куплю - Продам||Одежда, обувь, аксессуары","8||105");
+		map.put("Куплю - Продам||Все для офиса","2||102");
+		map.put("Куплю - Продам||Все остальное","8||86");
+		map.put("Куплю - Продам||Распродажа","205||209");
+		map.put("Куплю - Продам||Музыкальные инструменты","7||239");
+		map.put("Куплю - Продам||Электроника и техника","4||179");
+		map.put("Куплю - Продам||Красота и здоровье","8||246");
+		map.put("Куплю - Продам||Билеты","205||214");
+		map.put("Куплю - Продам||Книги, учебники и журналы","7||203");
+		map.put("Куплю - Продам||Игрушки, игры","6||241");
+		map.put("Куплю - Продам||Сотовые телефоны","4||69");
+		map.put("Куплю - Продам||Фото и видео камеры","4||65");
+		map.put("Куплю - Продам||Товары для спорта - велосипеды","7||74");
+		map.put("Куплю - Продам||Искусство, Коллекционирование, Хобби","7||70");
+		map.put("Куплю - Продам||Видеоигры - консоли","6||243");
+		map.put("Куплю - Продам||Ювелирные украшения, часы","8||107");
+		map.put("Куплю - Продам||Музыка и фильмы","7||239");
+		map.put("Недвижимость||Продажа квартир, домов","3||95");
+		map.put("Недвижимость||Аренда квартир, домов","3||180");
+		map.put("Недвижимость||Гаражи, стоянки","3||98");
+		map.put("Недвижимость||Аренда и продажа магазинов","3||99");
+		map.put("Недвижимость||Офисы, торговые площади","3||99");
+		map.put("Недвижимость||Аренда комнат - совместная аренда квартир","3||180");
+		map.put("Недвижимость||Земельные участки","3||97");
+		map.put("Недвижимость||Обмен недвижимости","3||186");
+		map.put("Недвижимость||Аренда недвижимости на курортах","3||180");
+		map.put("Образование||Другие курсы и тренинги","9||93");
+		map.put("Образование||Репетиторы - Частные уроки","9||93");
+		map.put("Образование||Изучение языков","9||93");
+		map.put("Образование||Компьютерные курсы","9||93");
+		map.put("Образование||Музыкальные, театральные и танцевальные школы","9||93");
+		map.put("Общество||Потерянное и найденное","205||211");
+		map.put("Общество||События","205||214");
+		map.put("Общество||Общественная деятельность","205||214");
+		map.put("Общество||Музыканты, группы, DJ, артисты","205||208");
+		map.put("Общество||Волонтеры, добровольцы","205||214");
+		map.put("Работа / Вакансии||Работа с клиентами","9||92");
+		map.put("Работа / Вакансии||Строительство, архитектура","9||92");
+		map.put("Работа / Вакансии||Финансы, бухгалтерия, банки","9||92");
+		map.put("Работа / Вакансии||Управление персоналом","9||92");
+		map.put("Работа / Вакансии||Медицина, фармацевтика","9||92");
+		map.put("Работа / Вакансии||Недвижимость","9||92");
+		map.put("Работа / Вакансии||Логистика, транспорт","9||92");
+		map.put("Работа / Вакансии||Продажи, закупки","9||92");
+		map.put("Работа / Вакансии||Прочие сферы деятельности","9||92");
+		map.put("Работа / Вакансии||ИТ, Интернет, связь","9||92");
+		map.put("Работа / Вакансии||Розничная торговля","9||92");
+		map.put("Работа / Вакансии||Маркетинг, Реклама, PR","9||92");
+		map.put("Работа / Вакансии||Производство","9||92");
+		map.put("Работа / Вакансии||Бары, рестораны","9||92");
+		map.put("Работа / Вакансии||Образование, тренинги","9||92");
+		map.put("Работа / Вакансии||Без спецнавыков, физический труд","9||92");
+		map.put("Работа / Вакансии||Секретариат, административный персонал","9||92");
+		map.put("Работа / Вакансии||Руководство, топ-менеджмент","9||92");
+		map.put("Работа / Вакансии||Юриспруденция","9||92");
+		map.put("Работа / Вакансии||Искусство, развлечения, масс-медиа","9||92");
+		map.put("Работа / Вакансии||Работа в гостиничном и туристическом бизнесе","9||92");
+		map.put("Работа / Вакансии||Некоммерческие организации, благотворительность","9||92");
+		map.put("Транспорт||Грузовые автомобили - коммерческие автомобили","1||51");
+		map.put("Транспорт||Легковые автомобили","1||50");
+		map.put("Транспорт||Автозапчасти","1||55");
+		map.put("Транспорт||Другой транспорт","1||54");
+		map.put("Транспорт||Лодки, Яхты","1||52");
+		map.put("Транспорт||Фургоны - дома на колесах - трейлеры","1||54");
+		map.put("Транспорт||Мотоциклы - скутеры","1||52");
+		map.put("Услуги||Прочие услуги","12||187");
+		map.put("Услуги||Красота, здоровье, фитнес","12||76");
+		map.put("Услуги||Ремонтные работы","12||201");
+		map.put("Услуги||Переезд, хранение","12||79");
+		map.put("Услуги||Организация праздников, видео и фотосъемка","12||77");
+		map.put("Услуги||Няни, домработницы","9||91");
+		map.put("Услуги||Хозяйство - Помощь по дому","12||216");
+		map.put("Услуги||Переводы, редактирование, копирайтинг","12||199");
+		map.put("Услуги||Интернет, компьютеры","12||219");
+		map.put("Услуги||Кастинг, прослушивание","205||214");
+		return map;
+	}
+	
+	String curTS = new java.text.SimpleDateFormat("yyyy-MM-dd hh:mm:ss").format(java.util.Calendar.getInstance ().getTime());
 }
 

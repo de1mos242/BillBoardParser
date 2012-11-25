@@ -18,7 +18,10 @@ public class Main {
 			parser.downloadAllReadedPages();
 			System.out.println("parsing pages");
 			parser.ParsePages();
+			System.out.println("exporting");
+			parser.ExportDML();
 			System.out.println("finish");
+			
 			
 		}
 		catch (Exception e)
