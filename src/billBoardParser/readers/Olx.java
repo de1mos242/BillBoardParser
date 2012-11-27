@@ -451,6 +451,7 @@ public class Olx {
 	}
 	
 	public void ExportDML() throws SQLException, IOException {
+		System.out.println("preparing worked pages");
 		ArrayList<String> exportedFiles = new ArrayList<String>();
 		ResultSet rs = dbStatement.executeQuery("select filename from exported_pages");
 		while (rs.next()) {
@@ -458,15 +459,37 @@ public class Olx {
 		}
 		rs.close();
 		
-		ArrayList<String> workSet = new ArrayList<String>();
-		rs = dbStatement.executeQuery("select distinct filename from parsed_page");
+		System.out.println("calculating pages to work");
+		HashMap<String, HashMap<String, HashMap<String, String>>> workSet = new HashMap<String, HashMap<String,HashMap<String,String>>>();
+		//ArrayList<String> workSet = new ArrayList<String>();
+		rs = dbStatement.executeQuery("select filename, type, name, data from parsed_page");
 		while(rs.next()) {
 			String tempFilename = rs.getString(1);
 			if (!exportedFiles.contains(tempFilename)) {
-				workSet.add(tempFilename);
+				if (!workSet.containsKey(tempFilename))
+				{
+					workSet.put(tempFilename, new HashMap<String, HashMap<String, String>>());
+					workSet.get(tempFilename).put("commonPart", new HashMap<String, String>());
+					workSet.get(tempFilename).put("userData", new HashMap<String, String>());
+					workSet.get(tempFilename).put("additionalFields", new HashMap<String, String>());
+				}
+				String type = rs.getString(2);
+				String name = rs.getString(3);
+				String data = rs.getString(4);
+				if (type.equals("commonField")) {
+					workSet.get(tempFilename).get("commonPart").put(name, data);
+				}
+				else if (type.equals("userData")) {
+					workSet.get(tempFilename).get("userData").put(name, data);
+				}
+				else if (type.equals("additionalFields")) {
+					workSet.get(tempFilename).get("additionalFields").put(name, data);
+				}
 			}
 		}
 		rs.close();
+		
+		System.out.println("exporting...");
 		
 		PreparedStatement insertStatment = dbConnection.prepareStatement("insert into 'exported_pages' ('filename') values (?);");
 		
@@ -474,8 +497,9 @@ public class Olx {
 		BufferedWriter exporter = new BufferedWriter(new FileWriter(new File("insert_statements.sql"), false));
 		int maxcount = 10;
 		int counter = 0;
-		for (int i=0;i<workSet.size();i++) {
-			String filename = workSet.get(i);
+		int i=0;
+		for (Entry<String, HashMap<String, HashMap<String, String>>> workHash : workSet.entrySet()) {
+			String filename = workHash.getKey();
 			if (counter == 0)
 			{
 				exporter.write(GetInsertHeader());
@@ -484,7 +508,7 @@ public class Olx {
 			System.out.println("export file " + filename);
 			try
 			{
-				exporter.write(exportSinglePage(filename));
+				exporter.write(exportSinglePage(workHash.getValue()));
 				insertStatment.setString(1, filename);
 				insertStatment.addBatch();
 				counter++;
@@ -510,27 +534,11 @@ public class Olx {
 		exporter.close();
 	}
 	
-	String exportSinglePage(String filename) throws Exception {
+	String exportSinglePage(HashMap<String, HashMap<String, String>> entry) throws Exception {
 		//'id' 'type' 'name' 'data' 'filename'
-		HashMap<String, String> commonPart = new HashMap<String, String>();
-		HashMap<String, String> userData = new HashMap<String, String>();
-		HashMap<String, String> additionalFields = new HashMap<String, String>();
-		ResultSet rs = dbStatement.executeQuery("select type, name, data from parsed_page where filename = '"+filename+"';");
-		while(rs.next()) {
-			String type = rs.getString(1);
-			String name = rs.getString(2);
-			String data = rs.getString(3);
-			if (type.equals("commonField")) {
-				commonPart.put(name, data);				
-			}
-			else if (type.equals("userData")) {
-				userData.put(name, data);
-			}
-			else if (type.equals("additionalFields")) {
-				additionalFields.put(name, data);
-			}
-		}
-		rs.close();
+		HashMap<String, String> commonPart = entry.get("commonPart");
+		HashMap<String, String> userData = entry.get("userData");
+		HashMap<String, String> additionalFields = entry.get("additionalFields");
 		
 		String category, Author, title, phone, text, price, catFields;
 		if (categoryMap.containsKey(commonPart.get("Type")+"||" + commonPart.get("SubType")))
